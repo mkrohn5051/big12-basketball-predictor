@@ -1,0 +1,49 @@
+﻿# Airflow
+logs/
+plugins/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.airflowignore
+airflow.db
+airflow.cfg
+webserver_config.py
+standalone_admin_password.txt
+
+# Data files (don't commit large datasets)
+data/
+*.csv
+*.pt
+*.pkl
+*.h5
+
+# Docker
+.env
+
+# Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Secrets (important!)
+*.key
+*.pem
+secrets/
+credentials/

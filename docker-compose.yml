@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+      - postgres-basketball-data:/var/lib/postgresql/basketball_data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1-python3.11
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "pip install --no-cache-dir --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128 &&
+               pip install beautifulsoup4 requests pandas scikit-learn xgboost sqlalchemy psycopg2-binary lxml html5lib &&
+               airflow db migrate &&
+               airflow users create --username admin --firstname Mike --lastname Admin --role Admin --email admin@example.com --password admin || true &&
+               airflow webserver"
+    restart: always
+    runtime: nvidia
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1-python3.11
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
+    command: >
+      bash -c "pip install --no-cache-dir --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128 &&
+               pip install beautifulsoup4 requests pandas scikit-learn xgboost sqlalchemy psycopg2-binary lxml html5lib &&
+               airflow scheduler"
+    restart: always
+    runtime: nvidia
+
+volumes:
+  postgres-db-volume:
+  postgres-basketball-data:

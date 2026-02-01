@@ -771,7 +771,7 @@ def train_traditional_ml_models(**context):
     context['ti'].xcom_push(key='best_accuracy', value=comparison.iloc[0]['test_accuracy'])
 
 def generate_predictions(**context):
-    """Task 7: Generate daily predictions for upcoming games"""
+    """Task 7: Generate daily predictions using ensemble of all models"""
     print("Generating predictions for upcoming Big 12 games...")
     
     engine = create_engine(DB_CONN)
@@ -785,21 +785,47 @@ def generate_predictions(**context):
     games_df = pd.read_sql('SELECT * FROM game_logs', engine)
     games_df['date'] = pd.to_datetime(games_df['date'], errors='coerce')
     
-    # Find future games (no result yet)
+    # Find future games
     future_games = games_df[games_df['result'].isna() | (games_df['result'] == '')]
     future_games = future_games.dropna(subset=['date'])
     future_games = future_games.sort_values('date')
     
     print(f"Found {len(future_games)} upcoming games")
     
-    # Load best model (neural network by default)
+    # Load ALL models
     import pickle
-    model_path = Path('/opt/airflow/data') / 'game_predictor_nn.pt'
-    checkpoint = torch.load(model_path)
+    models = {}
+    model_accuracies = {}
     
-    nn_model = GamePredictor(input_dim=checkpoint['input_dim'])
-    nn_model.load_state_dict(checkpoint['model_state'])
-    nn_model.eval()
+    # Load model results to get accuracies
+    model_results = pd.read_sql('SELECT * FROM model_results', engine)
+    
+    # Load traditional ML models
+    for model_name in ['random_forest', 'gradient_boosting', 'xgboost', 'logistic_regression']:
+        model_path = Path('/opt/airflow/data') / f'model_{model_name}.pkl'
+        if model_path.exists():
+            with open(model_path, 'rb') as f:
+                models[model_name] = pickle.load(f)
+            acc_row = model_results[model_results['model_type'] == model_name]
+            if len(acc_row) > 0:
+                model_accuracies[model_name] = acc_row['test_accuracy'].values[0]
+    
+    # Load neural network
+    nn_path = Path('/opt/airflow/data') / 'game_predictor_nn.pt'
+    if nn_path.exists():
+        checkpoint = torch.load(nn_path)
+        nn_model = GamePredictor(input_dim=checkpoint['input_dim'])
+        nn_model.load_state_dict(checkpoint['model_state'])
+        nn_model.eval()
+        models['neural_network'] = nn_model
+        model_accuracies['neural_network'] = checkpoint['test_accuracy']
+    
+    print(f"\nLoaded {len(models)} models:")
+    for name, acc in sorted(model_accuracies.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {name}: {acc:.4f}")
+    
+    best_model_name = max(model_accuracies, key=model_accuracies.get)
+    print(f"\nBest individual model: {best_model_name} ({model_accuracies[best_model_name]:.4f})")
     
     # Prepare feature columns
     stat_cols = ['avg_points', 'avg_opp_points', 'avg_fg_pct', 'avg_three_pct', 
@@ -808,91 +834,134 @@ def generate_predictions(**context):
     lstm_cols = [f'lstm_f{i}' for i in range(LSTM_FEATURE_DIM)]
     
     predictions = []
+    seen_matchups = set()
     
-    for idx, game in future_games.head(10).iterrows():  # Next 10 games
+    for idx, game in future_games.head(20).iterrows():
         team_a = game['team']
         team_b = game['opponent']
         game_date = game['date']
         
-        # Get team A data
+        # Get team data
         team_a_data = team_data[team_data['team'] == team_a]
         if len(team_a_data) == 0:
             continue
         
-        # Try to find team B
         team_b_candidates = team_data[team_data['team'].str.contains(team_b.split()[0], case=False, na=False)]
         if len(team_b_candidates) == 0:
-            # Non-conference or can't find opponent - skip
             continue
         
         team_b_data = team_b_candidates.iloc[0]
+        team_b_full = team_b_data['team']
         
-        # Build feature vector
+        # Deduplicate
+        matchup_id = tuple(sorted([team_a, team_b_full]))
+        if matchup_id in seen_matchups:
+            continue
+        seen_matchups.add(matchup_id)
+        
+        # Build features
         team_a_stats = team_a_data[stat_cols].values.flatten()
         team_a_lstm = team_a_data[lstm_cols].values.flatten()
         team_b_stats = team_b_data[stat_cols].values
         team_b_lstm = team_b_data[lstm_cols].values
         
         features = np.concatenate([team_a_stats, team_a_lstm, team_b_stats, team_b_lstm])
-
-        # convert to float + handle NaN
         features = features.astype(np.float32)
+        
         if np.isnan(features).any():
             continue
-
-        features_tensor = torch.FloatTensor(features).unsqueeze(0)
         
-        # Make prediction
-        with torch.no_grad():
-            prob = nn_model(features_tensor).item()
+        # Get predictions from ALL models
+        model_predictions = {}
         
-        predicted_winner = team_a if prob > 0.5 else team_b_data['team']
-        confidence = prob if prob > 0.5 else (1 - prob)
+        for model_name, model in models.items():
+            if model_name == 'neural_network':
+                # Neural network
+                with torch.no_grad():
+                    features_tensor = torch.FloatTensor(features).unsqueeze(0)
+                    prob = model(features_tensor).item()
+                model_predictions[model_name] = prob
+            else:
+                # Traditional ML models
+                pred_proba = model.predict_proba(features.reshape(1, -1))[0]
+                model_predictions[model_name] = pred_proba[1]
+        
+        # Weighted ensemble: weight by test accuracy
+        total_weight = sum(model_accuracies.values())
+        weighted_prob = sum(
+            model_predictions[name] * model_accuracies[name] 
+            for name in model_predictions
+        ) / total_weight
+        
+        # Simple majority vote
+        votes_for_team_a = sum(1 for prob in model_predictions.values() if prob > 0.5)
+        
+        # Get team stats
+        team_a_ppg = float(team_a_data['avg_points'].values[0])
+        team_b_ppg = float(team_b_data['avg_points'])
+        team_a_record = f"{int(team_a_data['wins'].values[0])}-{int(team_a_data['losses'].values[0])}"
+        team_b_record = f"{int(team_b_data['wins'])}-{int(team_b_data['losses'])}"
+        
+        predicted_winner = team_a if weighted_prob > 0.5 else team_b_full
+        confidence = weighted_prob if weighted_prob > 0.5 else (1 - weighted_prob)
         
         predictions.append({
             'date': game_date,
             'team_a': team_a,
-            'team_b': team_b_data['team'],
+            'team_b': team_b_full,
+            'team_a_ppg': team_a_ppg,
+            'team_b_ppg': team_b_ppg,
+            'team_a_record': team_a_record,
+            'team_b_record': team_b_record,
             'predicted_winner': predicted_winner,
-            'confidence': confidence,
-            'team_a_win_prob': prob
+            'ensemble_confidence': confidence,
+            'weighted_prob': weighted_prob,
+            'votes_for_a': votes_for_team_a,
+            'total_votes': len(model_predictions),
+            'model_predictions': str(model_predictions)  # For debugging
         })
     
-    # Create predictions DataFrame
     predictions_df = pd.DataFrame(predictions)
     
     if len(predictions_df) > 0:
-        # Save to database
+        predictions_df = predictions_df.sort_values('date')
         predictions_df.to_sql('daily_predictions', engine, if_exists='replace', index=False)
         
-        # Create a nice report
+        # Enhanced report
         report = []
-        report.append("="*70)
+        report.append("="*80)
         report.append(f"BIG 12 BASKETBALL PREDICTIONS - {datetime.now().strftime('%Y-%m-%d')}")
-        report.append("="*70)
+        report.append("="*80)
+        report.append(f"Ensemble Model: {len(models)} models voting")
+        report.append(f"Best Individual: {best_model_name.replace('_', ' ').title()} ({model_accuracies[best_model_name]:.1%})")
+        report.append("="*80)
         report.append("")
         
         for idx, pred in predictions_df.iterrows():
             date_str = pred['date'].strftime('%a, %b %d')
             report.append(f"{date_str}: {pred['team_a']} vs {pred['team_b']}")
-            report.append(f"  → Predicted Winner: {pred['predicted_winner']}")
-            report.append(f"  → Confidence: {pred['confidence']:.1%}")
+            report.append(f"  {pred['team_a']} ({pred['team_a_record']}, {pred['team_a_ppg']:.1f} PPG) vs {pred['team_b']} ({pred['team_b_record']}, {pred['team_b_ppg']:.1f} PPG)")
+            report.append(f"  🏆 ENSEMBLE PICK: {pred['predicted_winner']}")
+            report.append(f"  📊 Confidence: {pred['ensemble_confidence']:.1%}")
+            report.append(f"  🗳️  Model Vote: {pred['votes_for_a']}/{pred['total_votes']} models pick {pred['team_a']}")
+            report.append(f"  🎲 Win Probability: {pred['team_a']} {pred['weighted_prob']:.1%} | {pred['team_b']} {1-pred['weighted_prob']:.1%}")
             report.append("")
         
-        report.append("="*70)
+        report.append("="*80)
+        report.append(f"Total Predictions: {len(predictions_df)}")
+        report.append(f"Prediction Method: Accuracy-weighted ensemble")
+        report.append("="*80)
         report_text = "\n".join(report)
         
-        # Save report to file
         report_path = Path('/opt/airflow/data/raw') / f'predictions_{datetime.now().strftime("%Y%m%d")}.txt'
         with open(report_path, 'w') as f:
             f.write(report_text)
         
         print(report_text)
         print(f"\n✓ Report saved to {report_path}")
-        print(f"✓ Predictions saved to database")
         
     else:
-        print("No upcoming matchups found between Big 12 teams")
+        print("No upcoming matchups found")
     
     context['ti'].xcom_push(key='predictions_generated', value=len(predictions_df))
 

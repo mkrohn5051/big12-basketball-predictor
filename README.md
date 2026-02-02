@@ -54,7 +54,7 @@ This system scrapes live game data from Sports Reference, trains multiple ML mod
 
 \\\ash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/big12-basketball-predictor.git
+git clone https://github.com/mkrohn5051/big12-basketball-predictor.git
 cd big12-basketball-predictor
 
 # Start Airflow
@@ -161,7 +161,7 @@ MIT License - feel free to use this for your own predictions!
 
 ## 📧 Contact
 
-Built by Mike - Engineering Manager & ML Enthusiast
+Built by Mike
 \\\
 
 ---

@@ -39,7 +39,7 @@ services:
       - "8080:8080"
     command: >
       bash -c "pip install --no-cache-dir --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128 &&
-               pip install beautifulsoup4 requests pandas scikit-learn xgboost sqlalchemy psycopg2-binary lxml html5lib &&
+               pip install beautifulsoup4 requests pandas scikit-learn xgboost sqlalchemy psycopg2-binary lxml html5lib matplotlib seaborn &&
                airflow db migrate &&
                airflow users create --username admin --firstname Mike --lastname Admin --role Admin --email admin@example.com --password admin || true &&
                airflow webserver"
@@ -63,7 +63,7 @@ services:
       - ./models:/opt/airflow/models
     command: >
       bash -c "pip install --no-cache-dir --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128 &&
-               pip install beautifulsoup4 requests pandas scikit-learn xgboost sqlalchemy psycopg2-binary lxml html5lib &&
+               pip install beautifulsoup4 requests pandas scikit-learn xgboost sqlalchemy psycopg2-binary lxml html5lib matplotlib seaborn &&
                airflow scheduler"
     restart: always
     runtime: nvidia

@@ -347,52 +347,176 @@ def train_lstm_encoder(**context):
     
     print(f"Model architecture: {input_dim} -> LSTM(128) -> {LSTM_FEATURE_DIM}")
     
-    # Training setup (unsupervised - autoencoder style)
-    # We'll train it to reconstruct the mean of the sequence
+    # Training setup
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
     
-    # Simple training loop
+    # Track training history
+    training_history = {
+        'epoch': [],
+        'loss': [],
+        'iowa_state_embedding': []
+    }
+    
+    iowa_state_idx = team_names.index('Iowa State') if 'Iowa State' in team_names else None
+    
+    # Training loop with history tracking
     model.train()
     epochs = 50
     
+    print("\nTraining LSTM...")
     for epoch in range(epochs):
         optimizer.zero_grad()
         
         # Forward pass
         encoded = model(X_tensor)
         
-        # Target: mean statistics across the sequence
-        target = X_tensor.mean(dim=1)  # Average across time
-        # Project target to same dimension
-        target_proj = torch.FloatTensor(len(target), LSTM_FEATURE_DIM)
-        nn.init.normal_(target_proj)
-        
-        # Loss: encourage diverse but consistent encodings
-        loss = torch.var(encoded, dim=0).mean()  # Maximize variance across samples
+        # Loss: maximize variance across samples (encourage diverse embeddings)
+        loss = torch.var(encoded, dim=0).mean()
         loss = -loss  # We want high variance
         
         loss.backward()
         optimizer.step()
+        
+        # Track history
+        training_history['epoch'].append(epoch + 1)
+        training_history['loss'].append(loss.item())
+        
+        # Track Iowa State embedding if available
+        if iowa_state_idx is not None:
+            iowa_embedding = encoded[iowa_state_idx].detach().numpy()
+            training_history['iowa_state_embedding'].append(iowa_embedding.copy())
         
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
     
     print("✓ LSTM training complete")
     
-    # Generate and save features for all teams
+    # Generate final features
     model.eval()
     with torch.no_grad():
         lstm_features = model(X_tensor).numpy()
     
-    # Create DataFrame with features
+    # Create feature DataFrame
     feature_df = pd.DataFrame(lstm_features, columns=[f'lstm_f{i}' for i in range(LSTM_FEATURE_DIM)])
     feature_df['team'] = team_names
     
     # Save to database
     feature_df.to_sql('lstm_features', engine, if_exists='replace', index=False)
     print(f"✓ Saved LSTM features for {len(team_names)} teams")
-    print(f"✓ Feature dimension: {LSTM_FEATURE_DIM}")
+    
+    # === VISUALIZATION ===
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend for server
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+    from sklearn.manifold import TSNE
+    
+    print("\nGenerating visualizations...")
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(20, 12))
+    
+    # 1. Training Loss Curve
+    ax1 = plt.subplot(2, 3, 1)
+    ax1.plot(training_history['epoch'], training_history['loss'], 'b-', linewidth=2)
+    ax1.set_xlabel('Epoch', fontsize=12)
+    ax1.set_ylabel('Loss (Negative Variance)', fontsize=12)
+    ax1.set_title('LSTM Training Loss', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Iowa State Embedding Evolution (first 2 dimensions)
+    if iowa_state_idx is not None:
+        ax2 = plt.subplot(2, 3, 2)
+        iowa_embeddings = np.array(training_history['iowa_state_embedding'])
+        ax2.plot(training_history['epoch'], iowa_embeddings[:, 0], 'r-', label='Dim 0', linewidth=2)
+        ax2.plot(training_history['epoch'], iowa_embeddings[:, 1], 'g-', label='Dim 1', linewidth=2)
+        ax2.set_xlabel('Epoch', fontsize=12)
+        ax2.set_ylabel('Embedding Value', fontsize=12)
+        ax2.set_title('Iowa State Embedding Evolution (First 2 Dims)', fontsize=14, fontweight='bold')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    
+    # 3. PCA Projection (2D)
+    ax3 = plt.subplot(2, 3, 3)
+    pca = PCA(n_components=2)
+    embeddings_2d_pca = pca.fit_transform(lstm_features)
+    
+    # Plot all teams
+    ax3.scatter(embeddings_2d_pca[:, 0], embeddings_2d_pca[:, 1], 
+                c='lightblue', s=100, alpha=0.6, edgecolors='black')
+    
+    # Highlight Iowa State
+    if iowa_state_idx is not None:
+        ax3.scatter(embeddings_2d_pca[iowa_state_idx, 0], 
+                   embeddings_2d_pca[iowa_state_idx, 1],
+                   c='red', s=300, marker='*', edgecolors='darkred', linewidth=2,
+                   label='Iowa State', zorder=5)
+    
+    # Label all teams
+    for i, team in enumerate(team_names):
+        ax3.annotate(team, (embeddings_2d_pca[i, 0], embeddings_2d_pca[i, 1]),
+                    fontsize=8, alpha=0.7, ha='center')
+    
+    ax3.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} var)', fontsize=12)
+    ax3.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} var)', fontsize=12)
+    ax3.set_title('Team Embeddings (PCA Projection)', fontsize=14, fontweight='bold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # 4. t-SNE Projection (2D)
+    ax4 = plt.subplot(2, 3, 4)
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(5, len(lstm_features)-1))
+    embeddings_2d_tsne = tsne.fit_transform(lstm_features)
+    
+    ax4.scatter(embeddings_2d_tsne[:, 0], embeddings_2d_tsne[:, 1],
+                c='lightgreen', s=100, alpha=0.6, edgecolors='black')
+    
+    if iowa_state_idx is not None:
+        ax4.scatter(embeddings_2d_tsne[iowa_state_idx, 0],
+                   embeddings_2d_tsne[iowa_state_idx, 1],
+                   c='red', s=300, marker='*', edgecolors='darkred', linewidth=2,
+                   label='Iowa State', zorder=5)
+    
+    for i, team in enumerate(team_names):
+        ax4.annotate(team, (embeddings_2d_tsne[i, 0], embeddings_2d_tsne[i, 1]),
+                    fontsize=8, alpha=0.7, ha='center')
+    
+    ax4.set_xlabel('t-SNE Dimension 1', fontsize=12)
+    ax4.set_ylabel('t-SNE Dimension 2', fontsize=12)
+    ax4.set_title('Team Embeddings (t-SNE Projection)', fontsize=14, fontweight='bold')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    # 5. Embedding Magnitude by Team
+    ax5 = plt.subplot(2, 3, 5)
+    embedding_norms = np.linalg.norm(lstm_features, axis=1)
+    sorted_idx = np.argsort(embedding_norms)[::-1]
+    
+    colors = ['red' if team_names[i] == 'Iowa State' else 'skyblue' for i in sorted_idx]
+    ax5.barh(range(len(team_names)), embedding_norms[sorted_idx], color=colors)
+    ax5.set_yticks(range(len(team_names)))
+    ax5.set_yticklabels([team_names[i] for i in sorted_idx], fontsize=9)
+    ax5.set_xlabel('Embedding Magnitude', fontsize=12)
+    ax5.set_title('Team Embedding Magnitudes', fontsize=14, fontweight='bold')
+    ax5.grid(True, alpha=0.3, axis='x')
+    
+    # 6. Feature Variance
+    ax6 = plt.subplot(2, 3, 6)
+    feature_variance = np.var(lstm_features, axis=0)
+    ax6.bar(range(len(feature_variance)), feature_variance, color='purple', alpha=0.7)
+    ax6.set_xlabel('LSTM Feature Index', fontsize=12)
+    ax6.set_ylabel('Variance', fontsize=12)
+    ax6.set_title('LSTM Feature Variance Distribution', fontsize=14, fontweight='bold')
+    ax6.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    
+    # Save visualization
+    viz_path = Path('/opt/airflow/data/raw') / f'lstm_training_viz_{datetime.now().strftime("%Y%m%d")}.png'
+    plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Visualization saved to {viz_path}")
     
     # Save model
     model_path = Path('/opt/airflow/data') / 'lstm_encoder.pt'
@@ -400,11 +524,262 @@ def train_lstm_encoder(**context):
         'model_state': model.state_dict(),
         'input_dim': input_dim,
         'feature_cols': feature_cols,
-        'lstm_dim': LSTM_FEATURE_DIM
+        'lstm_dim': LSTM_FEATURE_DIM,
+        'training_history': training_history
     }, model_path)
     print(f"✓ Saved model to {model_path}")
     
     context['ti'].xcom_push(key='lstm_features_generated', value=len(team_names))
+
+def analyze_lstm_features(**context):
+    """Task 3b: Analyze what LSTM features represent"""
+    print("Analyzing LSTM feature interpretability...")
+    
+    engine = create_engine(DB_CONN)
+    
+    # Load the data
+    df = pd.read_sql('SELECT * FROM game_logs', engine)
+    df = df[df['result'].notna() & (df['result'] != '')]
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
+    df = df.sort_values(['team', 'date'])
+    
+    # Original input features
+    feature_cols = ['team_score', 'opp_score', 'fg_pct', 'three_pct', 'ft_pct', 
+                    'trb', 'ast', 'stl', 'blk', 'tov']
+    
+    for col in feature_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Load LSTM features and normalization
+    lstm_features_df = pd.read_sql('SELECT * FROM lstm_features', engine)
+    norm_params = pd.read_sql('SELECT * FROM lstm_norm_params', engine)
+    
+    # Calculate rolling statistics for each team (what the LSTM "sees")
+    team_rolling_stats = []
+    
+    for team in df['team'].unique():
+        team_df = df[df['team'] == team].copy()
+        team_df = team_df.dropna(subset=feature_cols)
+        
+        if len(team_df) >= SEQUENCE_LENGTH:
+            # Get last 10 games
+            recent = team_df.tail(SEQUENCE_LENGTH)
+            
+            # Calculate various statistics on the sequence
+            stats = {
+                'team': team,
+                # Means
+                'mean_points': recent['team_score'].mean(),
+                'mean_opp_points': recent['opp_score'].mean(),
+                'mean_fg_pct': recent['fg_pct'].mean(),
+                'mean_three_pct': recent['three_pct'].mean(),
+                'mean_ft_pct': recent['ft_pct'].mean(),
+                'mean_rebounds': recent['trb'].mean(),
+                'mean_assists': recent['ast'].mean(),
+                'mean_steals': recent['stl'].mean(),
+                'mean_blocks': recent['blk'].mean(),
+                'mean_turnovers': recent['tov'].mean(),
+                # Trends (linear regression slope)
+                'trend_points': np.polyfit(range(len(recent)), recent['team_score'], 1)[0],
+                'trend_fg_pct': np.polyfit(range(len(recent)), recent['fg_pct'].fillna(0), 1)[0],
+                'trend_three_pct': np.polyfit(range(len(recent)), recent['three_pct'].fillna(0), 1)[0],
+                # Volatility (std dev)
+                'std_points': recent['team_score'].std(),
+                'std_fg_pct': recent['fg_pct'].std(),
+                # Win streak
+                'wins_last_10': (recent['result'] == 'W').sum(),
+                # Recent performance (last 3 games avg)
+                'recent_3_points': recent.tail(3)['team_score'].mean(),
+                # Point differential
+                'avg_point_diff': (recent['team_score'] - recent['opp_score']).mean(),
+            }
+            team_rolling_stats.append(stats)
+    
+    rolling_df = pd.DataFrame(team_rolling_stats)
+    
+    # Merge with LSTM features
+    combined_df = rolling_df.merge(lstm_features_df, on='team', how='inner')
+    
+    print(f"Analyzing {len(combined_df)} teams")
+    
+    # Calculate correlations
+    stat_cols = [col for col in rolling_df.columns if col != 'team']
+    lstm_cols = [col for col in lstm_features_df.columns if col.startswith('lstm_f')]
+    
+    # Correlation matrix: each stat vs each LSTM feature
+    correlations = []
+    
+    for stat in stat_cols:
+        for lstm_feat in lstm_cols:
+            corr = combined_df[stat].corr(combined_df[lstm_feat])
+            correlations.append({
+                'stat': stat,
+                'lstm_feature': lstm_feat,
+                'correlation': corr
+            })
+    
+    corr_df = pd.DataFrame(correlations)
+    
+    # Drop NaN correlations
+    corr_df = corr_df.dropna(subset=['correlation'])
+    
+    # Save to database
+    corr_df.to_sql('lstm_feature_correlations', engine, if_exists='replace', index=False)
+    
+    if len(corr_df) == 0:
+        print("WARNING: No valid correlations found. Skipping analysis.")
+        context['ti'].xcom_push(key='features_analyzed', value=0)
+        return
+    
+    # Find top correlations for each LSTM feature
+    print("\nTop correlations for each LSTM feature:")
+    lstm_feature_meanings = []
+    
+    for lstm_feat in lstm_cols[:10]:  # Show first 10 features
+        feat_corrs = corr_df[corr_df['lstm_feature'] == lstm_feat]
+        if len(feat_corrs) > 0:
+            top_corrs = feat_corrs.nlargest(3, 'correlation', keep='all')
+            print(f"\n{lstm_feat}:")
+            for _, row in top_corrs.iterrows():
+                print(f"  {row['stat']}: {row['correlation']:.3f}")
+            
+            # Store interpretation
+            if len(top_corrs) > 0:
+                best_stat = top_corrs.iloc[0]['stat']
+                best_corr = top_corrs.iloc[0]['correlation']
+                lstm_feature_meanings.append({
+                    'lstm_feature': lstm_feat,
+                    'best_correlation': best_stat,
+                    'correlation_value': best_corr
+                })
+    
+    # === VISUALIZATIONS ===
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    print("\nGenerating correlation visualizations...")
+    
+    # Create pivot table for heatmap
+    corr_pivot = corr_df.pivot(index='stat', columns='lstm_feature', values='correlation')
+    
+    # Create figure with multiple subplots
+    fig = plt.figure(figsize=(24, 16))
+    
+    # 1. Full correlation heatmap
+    ax1 = plt.subplot(2, 2, 1)
+    sns.heatmap(corr_pivot, cmap='RdBu_r', center=0, vmin=-1, vmax=1,
+                cbar_kws={'label': 'Correlation'}, ax=ax1)
+    ax1.set_title('Input Stats vs LSTM Features Correlation Heatmap', fontsize=16, fontweight='bold')
+    ax1.set_xlabel('LSTM Feature Index', fontsize=12)
+    ax1.set_ylabel('Input Statistics', fontsize=12)
+    
+    # 2. Strongest correlations only (abs > 0.3)
+    ax2 = plt.subplot(2, 2, 2)
+    strong_corr = corr_df[abs(corr_df['correlation']) > 0.3].copy()
+    
+    if len(strong_corr) > 0:
+        strong_pivot = strong_corr.pivot(index='stat', columns='lstm_feature', values='correlation')
+        sns.heatmap(strong_pivot, cmap='RdBu_r', center=0, vmin=-1, vmax=1,
+                    cbar_kws={'label': 'Correlation'}, ax=ax2, annot=True, fmt='.2f')
+        ax2.set_title('Strong Correlations Only (|r| > 0.3)', fontsize=16, fontweight='bold')
+        ax2.set_xlabel('LSTM Feature Index', fontsize=12)
+        ax2.set_ylabel('Input Statistics', fontsize=12)
+    else:
+        ax2.text(0.5, 0.5, 'No strong correlations found (|r| > 0.3)', 
+                ha='center', va='center', transform=ax2.transAxes, fontsize=14)
+        ax2.set_title('Strong Correlations Only (|r| > 0.3)', fontsize=16, fontweight='bold')
+    
+    # 3. Top correlated stat for each LSTM feature
+    ax3 = plt.subplot(2, 2, 3)
+    
+    # Find strongest correlation for each LSTM feature (by absolute value)
+    def get_max_abs_idx(group):
+        abs_corr = group['correlation'].abs()
+        if len(abs_corr) > 0:
+            return abs_corr.idxmax()
+        return None
+    
+    max_indices = corr_df.groupby('lstm_feature').apply(get_max_abs_idx).dropna()
+    top_corrs_per_lstm = corr_df.loc[max_indices].copy()
+    top_corrs_per_lstm = top_corrs_per_lstm.sort_values('correlation', ascending=True)
+    
+    if len(top_corrs_per_lstm) > 0:
+        colors = ['red' if x < 0 else 'green' for x in top_corrs_per_lstm['correlation']]
+        ax3.barh(range(len(top_corrs_per_lstm)), top_corrs_per_lstm['correlation'], color=colors, alpha=0.6)
+        ax3.set_yticks(range(len(top_corrs_per_lstm)))
+        ax3.set_yticklabels([f"{row['lstm_feature']}: {row['stat']}" 
+                             for _, row in top_corrs_per_lstm.iterrows()], fontsize=7)
+        ax3.set_xlabel('Correlation Coefficient', fontsize=12)
+        ax3.set_title('Strongest Correlation for Each LSTM Feature', fontsize=16, fontweight='bold')
+        ax3.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
+        ax3.grid(True, alpha=0.3, axis='x')
+    else:
+        ax3.text(0.5, 0.5, 'No correlations to display', 
+                ha='center', va='center', transform=ax3.transAxes, fontsize=14)
+    
+    # 4. Distribution of correlation strengths
+    ax4 = plt.subplot(2, 2, 4)
+    ax4.hist(corr_df['correlation'].abs(), bins=30, color='purple', alpha=0.7, edgecolor='black')
+    ax4.axvline(x=0.3, color='red', linestyle='--', linewidth=2, label='Strong correlation threshold')
+    ax4.set_xlabel('Absolute Correlation Value', fontsize=12)
+    ax4.set_ylabel('Frequency', fontsize=12)
+    ax4.set_title('Distribution of Correlation Strengths', fontsize=16, fontweight='bold')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    
+    # Save visualization
+    viz_path = Path('/opt/airflow/data/raw') / f'lstm_feature_analysis_{datetime.now().strftime("%Y%m%d")}.png'
+    plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Analysis visualization saved to {viz_path}")
+    
+    # Create interpretation report
+    report = []
+    report.append("="*80)
+    report.append("LSTM FEATURE INTERPRETATION ANALYSIS")
+    report.append("="*80)
+    report.append("")
+    report.append("This analysis correlates LSTM features with interpretable input statistics")
+    report.append("to understand what temporal patterns each LSTM dimension captures.")
+    report.append("")
+    report.append("="*80)
+    report.append("TOP LSTM FEATURE INTERPRETATIONS")
+    report.append("="*80)
+    report.append("")
+    
+    for meaning in lstm_feature_meanings:
+        report.append(f"{meaning['lstm_feature']}: Most correlated with '{meaning['best_correlation']}'")
+        report.append(f"  Correlation: {meaning['correlation_value']:.3f}")
+        report.append("")
+    
+    report.append("="*80)
+    report.append(f"Total LSTM Features: {len(lstm_cols)}")
+    report.append(f"Input Statistics Analyzed: {len(stat_cols)}")
+    
+    if len(strong_corr) > 0:
+        report.append(f"Strong Correlations (|r| > 0.3): {len(strong_corr)}")
+    else:
+        report.append("Strong Correlations (|r| > 0.3): 0")
+    
+    report.append("="*80)
+    
+    report_text = "\n".join(report)
+    
+    # Save report
+    report_path = Path('/opt/airflow/data/raw') / f'lstm_interpretation_{datetime.now().strftime("%Y%m%d")}.txt'
+    with open(report_path, 'w') as f:
+        f.write(report_text)
+    
+    print(report_text)
+    print(f"\n✓ Interpretation report saved to {report_path}")
+    
+    context['ti'].xcom_push(key='features_analyzed', value=len(lstm_cols))
 
 def assemble_matchup_features(**context):
     """Task 4: Create matchup feature vectors from team stats + LSTM features"""
@@ -979,35 +1354,42 @@ task_averages = PythonOperator(
     dag=dag,
 )
 
-# Task 3: LSTM bits
+# Task 3: LSTM encoder and plots
 task_lstm = PythonOperator(
     task_id='train_lstm_encoder',
     python_callable=train_lstm_encoder,
     dag=dag,
 )
 
-# Task 4: Matchups
+# Task 4: LSTM analysis
+task_lstm_analysis = PythonOperator(
+    task_id='analyze_lstm_features',
+    python_callable=analyze_lstm_features,
+    dag=dag,
+)
+
+# Task 5: Matchups
 task_matchups = PythonOperator(
     task_id='assemble_matchup_features',
     python_callable=assemble_matchup_features,
     dag=dag,
 )
 
-# Task 5: train nn
+# Task 6: train nn
 task_train_nn = PythonOperator(
     task_id='train_neural_net_predictor',
     python_callable=train_neural_net_predictor,
     dag=dag,
 )
 
-# Task 6: train ml
+# Task 7: train ml
 task_train_ml = PythonOperator(
     task_id='train_traditional_ml_models',
     python_callable=train_traditional_ml_models,
     dag=dag,
 )
 
-# Task 7: predictions
+# Task 8: predictions
 task_predictions = PythonOperator(
     task_id='generate_predictions',
     python_callable=generate_predictions,
@@ -1015,4 +1397,4 @@ task_predictions = PythonOperator(
 )
 
 # Set task dependencies
-task_scrape >> task_averages >> task_lstm >> task_matchups >> task_train_nn >> task_train_ml >> task_predictions
+task_scrape >> task_averages >> task_lstm >> task_lstm_analysis >> task_matchups >> task_train_nn >> task_train_ml >> task_predictions
